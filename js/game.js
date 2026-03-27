@@ -5,10 +5,15 @@
  * - Grid: 60 cols × 40 rows, CELL_SIZE=10px, GAP=1px → canvas 659×439px.
  * - Ownership: grid[row][col] = player index (0,1,2) or EMPTY (-1).
  * - Players: 0=Greedy(orange), 1=Border(dark gray), 2=Hunter(green/human).
- * - PathFinding.js: PF.AStarFinder with allowDiagonal:true; fresh PF.Grid per search.
- * - All cells walkable for pathfinding; walkability ≠ claim rules.
- * - BFS uses 8-directional adjacency; first EMPTY found = Chebyshev-nearest empty.
+ * - Movement is 4-directional only (no diagonals).
+ * - A player may move into their own cells but NOT into another player's cells.
+ * - PathFinding.js: PF.AStarFinder (no diagonal); fresh PF.Grid per search.
+ *   Other players' cells are marked non-walkable; own cells are walkable.
+ * - BFS for nearest-empty also respects movement constraints (can't cross opponents).
  * - Collision: if next step targets another player's HEAD, skip turn (stay put).
+ * - After every move, enclosed empty regions surrounded by one player are auto-claimed.
+ *   "Enclosed" = connected EMPTY component that does not touch the grid edge,
+ *   whose entire border consists of cells owned by exactly one player.
  * - End condition checked after each complete round (AI moves + human move/skip).
  * - "No player moved" = greedy skipped AND border skipped AND human had no valid moves.
  * - setInterval drives tick updates; requestAnimationFrame drives rendering.
@@ -18,17 +23,17 @@ const COLS = 60;
 const ROWS = 40;
 const CELL_SIZE = 10;
 const GAP = 1;
-const STEP = CELL_SIZE + GAP;          // pixels per grid unit
+const STEP = CELL_SIZE + GAP;
 const TOTAL_CELLS = COLS * ROWS;
 const EMPTY = -1;
 
-const PLAYER_COLORS  = ['#e8820c', '#888888', '#27ae60'];
-const PLAYER_NAMES   = ['Greedy', 'Border', 'Hunter'];
-const PLAYER_STRATS  = ['Greedy AI', 'Border AI', 'You'];
-const EMPTY_COLOR    = '#cec6ba';
+const PLAYER_COLORS = ['#e8820c', '#888888', '#27ae60'];
+const PLAYER_NAMES  = ['Greedy', 'Border', 'Hunter'];
+const PLAYER_STRATS = ['Greedy AI', 'Border AI', 'You'];
+const EMPTY_COLOR   = '#cec6ba';
 
-// 8-directional offsets
-const DIRS = [[0,-1],[0,1],[-1,0],[1,0],[-1,-1],[-1,1],[1,-1],[1,1]];
+// 4-directional only
+const DIRS = [[0,-1],[0,1],[-1,0],[1,0]];
 
 let canvas, ctx;
 let domRefs = {};
@@ -65,7 +70,6 @@ function initGame() {
     pctEls:        [0,1,2].map(i => document.getElementById('pct-' + i))
   };
 
-  // Build empty grid
   gameState.grid = [];
   for (let r = 0; r < ROWS; r++) gameState.grid[r] = new Array(COLS).fill(EMPTY);
 
@@ -76,7 +80,6 @@ function initGame() {
   gameState.paused  = false;
   gameState.movedAI = false;
 
-  // Place heads ≥6 Manhattan apart; relax to ≥3 if needed
   let positions = tryPlacePlayers(6) || tryPlacePlayers(3);
   if (!positions) positions = [{ x: 10, y: 10 }, { x: 30, y: 20 }, { x: 50, y: 30 }];
 
@@ -156,20 +159,22 @@ function update() {
   if (gameState.status !== 'running' || gameState.phase !== 'AI') return;
 
   const g0 = greedyMove(0);
+  if (g0) floodFillCheck();
   const g1 = borderMove(1);
+  if (g1) floodFillCheck();
   gameState.movedAI = g0 || g1;
   gameState.tick++;
 
-  const validHumanMoves = getValidMoves(gameState.players[2].head);
+  // Valid human moves = EMPTY cells directly adjacent (used for auto-skip decision)
+  const validHumanMoves = getAdjacentEmpty(gameState.players[2].head);
 
   if (validHumanMoves.length === 0) {
-    // Auto-skip human — complete the round
     checkRoundEnd(false);
   } else {
     gameState.phase = 'HUMAN_WAIT';
     canvas.classList.add('human-turn');
     domRefs.statusMsg.classList.add('human-turn');
-    domRefs.statusMsg.textContent = 'Your turn — click an adjacent cell';
+    domRefs.statusMsg.textContent = 'Your turn — click or use WASD / arrow keys';
   }
 }
 
@@ -193,7 +198,8 @@ function countEmpty() {
   return n;
 }
 
-function getValidMoves(head) {
+// Returns EMPTY cells 4-adjacent to head (used for auto-skip and highlight)
+function getAdjacentEmpty(head) {
   const moves = [];
   for (const [dx, dy] of DIRS) {
     const nx = head.x + dx, ny = head.y + dy;
@@ -203,88 +209,22 @@ function getValidMoves(head) {
   return moves;
 }
 
-// ─── Strategies ──────────────────────────────────────────────────────────────
+// ─── Pathfinding helpers ──────────────────────────────────────────────────────
 
-function greedyMove(playerIdx) {
-  const player = gameState.players[playerIdx];
-  const target = bfsNearestEmpty(player.head.x, player.head.y);
-  if (!target) return false;
-
+// PF.Grid where other players' cells are obstacles; own + empty are walkable.
+function buildPFGrid(playerIdx) {
   const pfGrid = new PF.Grid(COLS, ROWS);
-  const finder = new PF.AStarFinder({ allowDiagonal: true });
-  const path   = finder.findPath(player.head.x, player.head.y, target.x, target.y, pfGrid);
-
-  if (!path || path.length < 2) return false;
-
-  const [stepX, stepY] = path[1];
-  if (isHeadCollision(playerIdx, stepX, stepY)) return false;
-
-  player.head = { x: stepX, y: stepY };
-  gameState.grid[stepY][stepX] = playerIdx;
-  return true;
-}
-
-function borderMove(playerIdx) {
-  const player = gameState.players[playerIdx];
-
-  // Collect owned cells
-  const owned = [];
   for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++)
-      if (gameState.grid[r][c] === playerIdx) owned.push({ x: c, y: r });
-
-  if (owned.length === 0) return false;
-
-  // Centroid of owned territory
-  const centX = owned.reduce((s, p) => s + p.x, 0) / owned.length;
-  const centY = owned.reduce((s, p) => s + p.y, 0) / owned.length;
-
-  // Border cells: owned cells with ≥1 EMPTY neighbour
-  const borderCells = owned.filter(p => {
-    for (const [dx, dy] of DIRS) {
-      const nx = p.x + dx, ny = p.y + dy;
-      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && gameState.grid[ny][nx] === EMPTY)
-        return true;
+    for (let c = 0; c < COLS; c++) {
+      const v = gameState.grid[r][c];
+      if (v !== EMPTY && v !== playerIdx)
+        pfGrid.setWalkableAt(c, r, false);
     }
-    return false;
-  });
-  if (borderCells.length === 0) return false;
-
-  // Pick border cell furthest from centroid
-  borderCells.sort((a, b) => {
-    const da = (a.x - centX) ** 2 + (a.y - centY) ** 2;
-    const db = (b.x - centX) ** 2 + (b.y - centY) ** 2;
-    return db - da;
-  });
-  const borderCell = borderCells[0];
-
-  // First EMPTY neighbour of that border cell is the target
-  let target = null;
-  for (const [dx, dy] of DIRS) {
-    const nx = borderCell.x + dx, ny = borderCell.y + dy;
-    if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && gameState.grid[ny][nx] === EMPTY) {
-      target = { x: nx, y: ny };
-      break;
-    }
-  }
-  if (!target) return false;
-
-  const pfGrid = new PF.Grid(COLS, ROWS);
-  const finder = new PF.AStarFinder({ allowDiagonal: true });
-  const path   = finder.findPath(player.head.x, player.head.y, target.x, target.y, pfGrid);
-
-  if (!path || path.length < 2) return false;
-
-  const [stepX, stepY] = path[1];
-  if (isHeadCollision(playerIdx, stepX, stepY)) return false;
-
-  player.head = { x: stepX, y: stepY };
-  gameState.grid[stepY][stepX] = playerIdx;
-  return true;
+  return pfGrid;
 }
 
-// BFS over all cells; returns first EMPTY cell found (Chebyshev-nearest)
-function bfsNearestEmpty(startX, startY) {
+// BFS constrained to own + empty cells; returns nearest reachable EMPTY cell.
+function bfsNearestEmpty(startX, startY, playerIdx) {
   const visited = new Uint8Array(COLS * ROWS);
   const startIdx = startX + startY * COLS;
   visited[startIdx] = 1;
@@ -300,8 +240,11 @@ function bfsNearestEmpty(startX, startY) {
       if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
       const nidx = nx + ny * COLS;
       if (visited[nidx]) continue;
+      const v = gameState.grid[ny][nx];
+      // Can only traverse own cells or empty cells
+      if (v !== EMPTY && v !== playerIdx) continue;
       visited[nidx] = 1;
-      if (gameState.grid[ny][nx] === EMPTY) return { x: nx, y: ny };
+      if (v === EMPTY) return { x: nx, y: ny };
       queue.push(nidx);
     }
   }
@@ -318,6 +261,135 @@ function isHeadCollision(playerIdx, nx, ny) {
   return false;
 }
 
+// ─── Strategies ──────────────────────────────────────────────────────────────
+
+function greedyMove(playerIdx) {
+  const player = gameState.players[playerIdx];
+  const target = bfsNearestEmpty(player.head.x, player.head.y, playerIdx);
+  if (!target) return false;
+
+  const pfGrid = buildPFGrid(playerIdx);
+  const finder = new PF.AStarFinder();
+  const path   = finder.findPath(player.head.x, player.head.y, target.x, target.y, pfGrid);
+
+  if (!path || path.length < 2) return false;
+
+  const [stepX, stepY] = path[1];
+  if (isHeadCollision(playerIdx, stepX, stepY)) return false;
+
+  player.head = { x: stepX, y: stepY };
+  gameState.grid[stepY][stepX] = playerIdx;
+  return true;
+}
+
+function borderMove(playerIdx) {
+  const player = gameState.players[playerIdx];
+
+  const owned = [];
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++)
+      if (gameState.grid[r][c] === playerIdx) owned.push({ x: c, y: r });
+
+  if (owned.length === 0) return false;
+
+  const centX = owned.reduce((s, p) => s + p.x, 0) / owned.length;
+  const centY = owned.reduce((s, p) => s + p.y, 0) / owned.length;
+
+  // Border cells: owned cells with ≥1 EMPTY 4-neighbour
+  const borderCells = owned.filter(p => {
+    for (const [dx, dy] of DIRS) {
+      const nx = p.x + dx, ny = p.y + dy;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && gameState.grid[ny][nx] === EMPTY)
+        return true;
+    }
+    return false;
+  });
+  if (borderCells.length === 0) return false;
+
+  borderCells.sort((a, b) => {
+    const da = (a.x - centX) ** 2 + (a.y - centY) ** 2;
+    const db = (b.x - centX) ** 2 + (b.y - centY) ** 2;
+    return db - da;
+  });
+  const borderCell = borderCells[0];
+
+  let target = null;
+  for (const [dx, dy] of DIRS) {
+    const nx = borderCell.x + dx, ny = borderCell.y + dy;
+    if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && gameState.grid[ny][nx] === EMPTY) {
+      target = { x: nx, y: ny };
+      break;
+    }
+  }
+  if (!target) return false;
+
+  const pfGrid = buildPFGrid(playerIdx);
+  const finder = new PF.AStarFinder();
+  const path   = finder.findPath(player.head.x, player.head.y, target.x, target.y, pfGrid);
+
+  if (!path || path.length < 2) return false;
+
+  const [stepX, stepY] = path[1];
+  if (isHeadCollision(playerIdx, stepX, stepY)) return false;
+
+  player.head = { x: stepX, y: stepY };
+  gameState.grid[stepY][stepX] = playerIdx;
+  return true;
+}
+
+// ─── Flood fill ───────────────────────────────────────────────────────────────
+
+// Auto-claim any EMPTY region fully enclosed by one player's cells.
+// Runs repeatedly until no new enclosures are found.
+function floodFillCheck() {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const visited = new Uint8Array(COLS * ROWS);
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        if (gameState.grid[r][c] !== EMPTY || visited[r * COLS + c]) continue;
+
+        // BFS to map the connected EMPTY component
+        const component = [];
+        const queue = [c + r * COLS];
+        visited[c + r * COLS] = 1;
+        let touchesEdge = false;
+        const surrounding = new Set();
+
+        while (queue.length > 0) {
+          const idx = queue.shift();
+          const cx = idx % COLS, cy = (idx / COLS) | 0;
+          component.push(idx);
+          if (cx === 0 || cx === COLS - 1 || cy === 0 || cy === ROWS - 1) touchesEdge = true;
+
+          for (const [dx, dy] of DIRS) {
+            const nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
+            const nidx = nx + ny * COLS;
+            const v = gameState.grid[ny][nx];
+            if (v === EMPTY) {
+              if (!visited[nidx]) { visited[nidx] = 1; queue.push(nidx); }
+            } else {
+              surrounding.add(v);
+            }
+          }
+        }
+
+        // Claim only if not open to edge and bordered by exactly one player
+        if (!touchesEdge && surrounding.size === 1) {
+          const owner = [...surrounding][0];
+          for (const idx of component) {
+            gameState.grid[(idx / COLS) | 0][idx % COLS] = owner;
+          }
+          changed = true;
+        }
+      }
+    }
+  }
+}
+
 // ─── Human input ─────────────────────────────────────────────────────────────
 
 const KEY_DIRS = {
@@ -331,8 +403,6 @@ function handleKey(e) {
   if (gameState.phase !== 'HUMAN_WAIT' || gameState.status !== 'running') return;
   const dir = KEY_DIRS[e.key];
   if (!dir) return;
-
-  // Prevent arrow keys from scrolling the page
   e.preventDefault();
 
   const player = gameState.players[2];
@@ -340,10 +410,13 @@ function handleKey(e) {
   const ny = player.head.y + dir[1];
 
   if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) return;
-  if (gameState.grid[ny][nx] !== EMPTY) return;
+  const v = gameState.grid[ny][nx];
+  // Allow empty or own cells; block other players' cells
+  if (v !== EMPTY && v !== 2) return;
 
   player.head = { x: nx, y: ny };
   gameState.grid[ny][nx] = 2;
+  floodFillCheck();
   checkRoundEnd(true);
 }
 
@@ -364,13 +437,14 @@ function handleClick(e) {
   const player = gameState.players[2];
   const { x, y } = player.head;
 
-  // Must be 8-adjacent and not the same cell
-  if (Math.abs(col - x) > 1 || Math.abs(row - y) > 1 || (col === x && row === y)) return;
-  if (gameState.grid[row][col] !== EMPTY) return;
+  // Must be exactly 1 step away in a cardinal direction
+  if (Math.abs(col - x) + Math.abs(row - y) !== 1) return;
+  const v = gameState.grid[row][col];
+  if (v !== EMPTY && v !== 2) return;
 
   player.head = { x: col, y: row };
   gameState.grid[row][col] = 2;
-
+  floodFillCheck();
   checkRoundEnd(true);
 }
 
@@ -407,7 +481,6 @@ function endGame() {
 function render() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Draw all cells
   for (let r = 0; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
       const owner = gameState.grid[r][c];
@@ -417,10 +490,10 @@ function render() {
     }
   }
 
-  // Highlight valid human moves during HUMAN_WAIT
+  // Highlight empty cells adjacent to human head during HUMAN_WAIT
   if (gameState.phase === 'HUMAN_WAIT' && gameState.status === 'running') {
     const h = gameState.players[2].head;
-    ctx.fillStyle = 'rgba(255,255,255,0.38)';
+    ctx.fillStyle = 'rgba(255,255,255,0.40)';
     for (const [dx, dy] of DIRS) {
       const nx = h.x + dx, ny = h.y + dy;
       if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && gameState.grid[ny][nx] === EMPTY) {
@@ -435,12 +508,10 @@ function render() {
     const px = player.head.x * STEP;
     const py = player.head.y * STEP;
 
-    // Head square (same color, re-draw to ensure it's on top)
     ctx.fillStyle = player.color;
     drawRoundedRect(px, py, CELL_SIZE, CELL_SIZE, 2);
     ctx.fill();
 
-    // Two white eye dots
     ctx.fillStyle = 'white';
     ctx.beginPath();
     ctx.arc(px + 3, py + 3.5, 1.3, 0, Math.PI * 2);
@@ -458,7 +529,6 @@ function drawRoundedRect(x, y, w, h, r) {
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, r);
   } else {
-    // Manual arc-based fallback
     ctx.beginPath();
     ctx.moveTo(x + r, y);
     ctx.lineTo(x + w - r, y);
