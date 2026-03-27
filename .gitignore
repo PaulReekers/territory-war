@@ -1,0 +1,50 @@
+hoe zet ik een goede GitHub connectie op, Ik heb een lokale folder territory-war en mijn GitHub is https://github.com/PaulReekers. Ik wil een .gitignore met 
+
+# Claude
+.claude/
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+
+# Node & dependencies (voor als je later tooling gebruikt)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment & config
+.env
+*.local
+
+# Logs
+*.log
+logs/
+error_log
+
+# PHP / Composer
+vendor/
+composer.lock
+
+# Cache & build
+dist/
+build/
+.cache/
+*.tmp
+
+# Images generated / cache
+*.psd
+*.ai
+*.xcf
+
+# Misc
+*.bak
+*.old
