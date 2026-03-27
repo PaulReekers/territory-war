@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Territory War</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+    <h1>Territory War</h1>
+    <div id="game-wrap">
+      <canvas id="gameCanvas"></canvas>
+    </div>
+    <div id="controls">
+      <button id="playPauseBtn">Pause</button>
+      <div id="speed-control">
+        <label for="speedSlider">Speed</label>
+        <input type="range" id="speedSlider" min="1" max="20" value="10">
+        <span id="fpsLabel">10 FPS</span>
+      </div>
+      <span id="statusMsg">Playing</span>
+    </div>
+    <div id="score-panel">
+      <div class="score-row" id="score-row-0">
+        <span class="player-dot dot-0"></span>
+        <span class="player-name">Greedy</span>
+        <span class="player-strategy">Greedy AI</span>
+        <span class="player-cells" id="cells-0">1</span>
+        <span class="player-pct" id="pct-0">0.0%</span>
+      </div>
+      <div class="score-row" id="score-row-1">
+        <span class="player-dot dot-1"></span>
+        <span class="player-name">Border</span>
+        <span class="player-strategy">Border AI</span>
+        <span class="player-cells" id="cells-1">1</span>
+        <span class="player-pct" id="pct-1">0.0%</span>
+      </div>
+      <div class="score-row" id="score-row-2">
+        <span class="player-dot dot-2"></span>
+        <span class="player-name">Hunter</span>
+        <span class="player-strategy">You</span>
+        <span class="player-cells" id="cells-2">1</span>
+        <span class="player-pct" id="pct-2">0.0%</span>
+      </div>
+    </div>
+    <div id="game-over-panel" class="hidden">
+      <h2>Game Over</h2>
+      <p id="winner-text"></p>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/pathfinding@0.4.18/visual/lib/pathfinding-browser.min.js"></script>
+  <script src="js/game.js" defer></script>
+</body>
+</html>
