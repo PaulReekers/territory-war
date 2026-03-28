@@ -19,7 +19,7 @@
  * - setInterval drives tick updates; requestAnimationFrame drives rendering.
  */
 
-const COLS = 60;
+const COLS = 40;
 const ROWS = 40;
 const CELL_SIZE = 10;
 const GAP = 1;
@@ -159,16 +159,33 @@ function update() {
   if (gameState.status !== 'running' || gameState.phase !== 'AI') return;
 
   const g0 = greedyMove(0);
-  if (g0) floodFillCheck();
+  if (g0) { floodFillCheck(); if (checkMajority()) return; }
   const g1 = borderMove(1);
-  if (g1) floodFillCheck();
+  if (g1) { floodFillCheck(); if (checkMajority()) return; }
   gameState.movedAI = g0 || g1;
   gameState.tick++;
 
-  // Valid human moves = EMPTY cells directly adjacent (used for auto-skip decision)
-  const validHumanMoves = getAdjacentEmpty(gameState.players[2].head);
+  const h2 = gameState.players[2].head;
 
-  if (validHumanMoves.length === 0) {
+  // If neither AI could move, check whether human has already won or is projected to win
+  // by claiming all empty cells still reachable through their own territory.
+  if (!gameState.movedAI) {
+    const reachable = countReachableEmpty(h2, 2);
+    if (reachable > 0) {
+      const counts = countAllCells();
+      const aiMax = Math.max(counts[0], counts[1]);
+      // Human wins if currently ahead OR projected ahead after claiming reachable empty cells
+      if (counts[2] > aiMax || counts[2] + reachable > aiMax) {
+        endGame('ai_stuck', 2);
+        return;
+      }
+    }
+  }
+
+  // Human gets a turn only if at least one EMPTY cell is reachable via own territory.
+  const humanCanReach = bfsNearestEmpty(h2.x, h2.y, 2) !== null;
+
+  if (!humanCanReach) {
     checkRoundEnd(false);
   } else {
     gameState.phase = 'HUMAN_WAIT';
@@ -181,7 +198,7 @@ function update() {
 function checkRoundEnd(humanMoved) {
   const anyMoved = gameState.movedAI || humanMoved;
   if (countEmpty() === 0 || !anyMoved) {
-    endGame();
+    endGame('normal');
   } else {
     gameState.phase = 'AI';
     canvas.classList.remove('human-turn');
@@ -198,7 +215,7 @@ function countEmpty() {
   return n;
 }
 
-// Returns EMPTY cells 4-adjacent to head (used for auto-skip and highlight)
+// Returns EMPTY cells 4-adjacent to head (used for render highlight)
 function getAdjacentEmpty(head) {
   const moves = [];
   for (const [dx, dy] of DIRS) {
@@ -207,6 +224,56 @@ function getAdjacentEmpty(head) {
       moves.push({ x: nx, y: ny });
   }
   return moves;
+}
+
+// Returns all cells the human can legally step onto: EMPTY or own cells.
+// Used for auto-skip decision — human gets a turn as long as any step is possible.
+function getAdjacentValid(head) {
+  const moves = [];
+  for (const [dx, dy] of DIRS) {
+    const nx = head.x + dx, ny = head.y + dy;
+    if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
+      const v = gameState.grid[ny][nx];
+      if (v === EMPTY || v === 2) moves.push({ x: nx, y: ny });
+    }
+  }
+  return moves;
+}
+
+// Count cells owned by each player.
+function countAllCells() {
+  const counts = [0, 0, 0];
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++) {
+      const v = gameState.grid[r][c];
+      if (v >= 0) counts[v]++;
+    }
+  return counts;
+}
+
+// BFS from head through own + empty cells; returns number of EMPTY cells reachable.
+function countReachableEmpty(head, playerIdx) {
+  const visited = new Uint8Array(COLS * ROWS);
+  const startIdx = head.x + head.y * COLS;
+  visited[startIdx] = 1;
+  const queue = [startIdx];
+  let empty = 0;
+  while (queue.length > 0) {
+    const idx = queue.shift();
+    const cx = idx % COLS, cy = (idx / COLS) | 0;
+    for (const [dx, dy] of DIRS) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
+      const nidx = nx + ny * COLS;
+      if (visited[nidx]) continue;
+      const v = gameState.grid[ny][nx];
+      if (v !== EMPTY && v !== playerIdx) continue;
+      visited[nidx] = 1;
+      if (v === EMPTY) empty++;
+      queue.push(nidx);
+    }
+  }
+  return empty;
 }
 
 // ─── Pathfinding helpers ──────────────────────────────────────────────────────
@@ -417,7 +484,7 @@ function handleKey(e) {
   player.head = { x: nx, y: ny };
   gameState.grid[ny][nx] = 2;
   floodFillCheck();
-  checkRoundEnd(true);
+  if (!checkMajority()) checkRoundEnd(true);
 }
 
 function handleClick(e) {
@@ -445,35 +512,58 @@ function handleClick(e) {
   player.head = { x: col, y: row };
   gameState.grid[row][col] = 2;
   floodFillCheck();
-  checkRoundEnd(true);
+  if (!checkMajority()) checkRoundEnd(true);
+}
+
+// ─── Majority check ───────────────────────────────────────────────────────────
+
+// Returns true (and ends the game) if any player owns more than 50% of all cells.
+function checkMajority() {
+  if (gameState.status !== 'running') return false;
+  const counts = countAllCells();
+  for (let i = 0; i < 3; i++) {
+    if (counts[i] > TOTAL_CELLS / 2) {
+      endGame('majority', i);
+      return true;
+    }
+  }
+  return false;
 }
 
 // ─── End game ────────────────────────────────────────────────────────────────
 
-function endGame() {
+// reason: 'majority' → >50% claimed  |  'ai_stuck' → AI frozen, human wins  |  'normal'
+function endGame(reason, forcedWinner) {
   gameState.status = 'ended';
   gameState.phase  = 'AI';
   canvas.classList.remove('human-turn');
   domRefs.statusMsg.classList.remove('human-turn');
   domRefs.statusMsg.textContent = 'Game Over';
 
-  const counts = [0, 0, 0];
-  for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++) {
-      const v = gameState.grid[r][c];
-      if (v >= 0) counts[v]++;
-    }
+  const counts = countAllCells();
 
-  const max       = Math.max(...counts);
-  const winnerIdx = counts.indexOf(max);
+  // Winner is explicit for early endings; highest count for normal end.
+  const winnerIdx = (reason !== 'normal') ? forcedWinner : counts.indexOf(Math.max(...counts));
+  const winCells  = counts[winnerIdx];
+  const winPct    = ((winCells / TOTAL_CELLS) * 100).toFixed(1);
 
   for (let i = 0; i < 3; i++)
     domRefs.scoreRows[i].classList.toggle('winner', i === winnerIdx);
 
   domRefs.gameOverPanel.classList.remove('hidden');
-  domRefs.winnerText.textContent =
-    PLAYER_NAMES[winnerIdx] + ' wins with ' + max + ' cells (' +
-    ((max / TOTAL_CELLS) * 100).toFixed(1) + '%)';
+
+  if (reason === 'majority' && winnerIdx === 2) {
+    domRefs.winnerText.textContent = 'You won! 🎉 (' + winPct + '% — majority reached)';
+  } else if (reason === 'majority') {
+    domRefs.winnerText.textContent =
+      PLAYER_NAMES[winnerIdx] + ' wins! ' + winPct + '% — majority reached';
+  } else if (reason === 'ai_stuck') {
+    domRefs.winnerText.textContent =
+      'You won! 🎉 AI players are stuck — you claim the rest (' + winPct + '% now)';
+  } else {
+    domRefs.winnerText.textContent =
+      PLAYER_NAMES[winnerIdx] + ' wins with ' + winCells + ' cells (' + winPct + '%)';
+  }
 }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
@@ -490,13 +580,21 @@ function render() {
     }
   }
 
-  // Highlight empty cells adjacent to human head during HUMAN_WAIT
+  // Highlight valid human moves during HUMAN_WAIT:
+  //   EMPTY neighbours → bright white overlay (new territory)
+  //   Own-color neighbours → subtle white overlay (traversal only)
   if (gameState.phase === 'HUMAN_WAIT' && gameState.status === 'running') {
     const h = gameState.players[2].head;
-    ctx.fillStyle = 'rgba(255,255,255,0.40)';
     for (const [dx, dy] of DIRS) {
       const nx = h.x + dx, ny = h.y + dy;
-      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && gameState.grid[ny][nx] === EMPTY) {
+      if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) continue;
+      const v = gameState.grid[ny][nx];
+      if (v === EMPTY) {
+        ctx.fillStyle = 'rgba(255,255,255,0.42)';
+        drawRoundedRect(nx * STEP, ny * STEP, CELL_SIZE, CELL_SIZE, 2);
+        ctx.fill();
+      } else if (v === 2) {
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
         drawRoundedRect(nx * STEP, ny * STEP, CELL_SIZE, CELL_SIZE, 2);
         ctx.fill();
       }
@@ -544,12 +642,7 @@ function drawRoundedRect(x, y, w, h, r) {
 }
 
 function updateScorePanel() {
-  const counts = [0, 0, 0];
-  for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++) {
-      const v = gameState.grid[r][c];
-      if (v >= 0) counts[v]++;
-    }
+  const counts = countAllCells();
   for (let i = 0; i < 3; i++) {
     const pct = ((counts[i] / TOTAL_CELLS) * 100).toFixed(1);
     domRefs.cellsEls[i].textContent = counts[i];
